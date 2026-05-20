@@ -312,7 +312,8 @@ class OPCInfluxWorker(QThread):
 
                 while self._is_running:
                     try:
-                        datavalues = await client.read_values(nodes)
+                        nodeids = [node.nodeid for node in nodes]
+                        datavalues = await client.uaclient.read_attributes(nodeids, ua.AttributeIds.Value)
                         timestamp = datetime.now(timezone.utc)
                         point = Point(self.db_measurement).time(timestamp, WritePrecision.NS)
 
@@ -1936,7 +1937,6 @@ class MainWindow(QMainWindow):
         self.selected_tags_tree.clear()
         self.write_tag_combo.clear()
         self.tag_item_map.clear()
-        self.pi_tag_item_map.clear()
 
         # 1. OPC Tags
         for nid, name in self.selected_opc_tags.items():
@@ -1953,18 +1953,6 @@ class MainWindow(QMainWindow):
             self.selected_tags_tree.addTopLevelItem(item)
             self.tag_item_map[nid] = item
             if nid in self.output_tags: self.write_tag_combo.addItem(f"{name} ({nid})", userData=nid)
-
-        # 2. PI Tags
-        for tag in self.pi_tags:
-            wid = tag.get('webId', '')
-            name = tag.get('name', 'Unknown')
-            alias = tag.get('alias', name)
-            
-            item = QTreeWidgetItem([alias, wid, "[PI-IN]", "[Float]", "---"])
-            item.setData(1, Qt.ItemDataRole.UserRole, wid)
-            item.setForeground(2, QColor("#a6e3a1")) # Green for PI
-            self.selected_tags_tree.addTopLevelItem(item)
-            self.pi_tag_item_map[wid] = item
 
         self._update_write_combo()
 

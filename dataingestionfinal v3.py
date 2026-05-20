@@ -311,12 +311,19 @@ class OPCInfluxWorker(QThread):
                 nodes = [client.get_node(nid) for nid in self.selected_tags_nodeids]
 
                 while self._is_running:
+                    # 1. Read from OPC UA (triggers reconnect on error)
                     try:
                         nodeids = [node.nodeid for node in nodes]
                         datavalues = await asyncio.wait_for(
                             client.uaclient.read_attributes(nodeids, ua.AttributeIds.Value),
                             timeout=5.0
                         )
+                    except Exception as opc_err:
+                        self.log_message.emit(f"OPC UA Read Error: {opc_err}")
+                        raise
+
+                    # 2. Process and write to InfluxDB
+                    try:
                         timestamp = datetime.now(timezone.utc)
                         point = Point(self.db_measurement).time(timestamp, WritePrecision.NS)
 
@@ -387,14 +394,11 @@ class OPCInfluxWorker(QThread):
                                 # Temporary Trace Log
                                 self.log_message.emit(f"DEBUG Trace: {tag_name} = {final_val}")
 
-                        write_api.write(bucket=self.influx_config['bucket'], org=self.influx_config['org'], record=point)
-                        self.data_written.emit(f"✅ Live: {', '.join(log_samples)} ({len(log_samples)} fields)")
-                    except Exception as e:
-                        self.log_message.emit(f"Read Error: {e}")
-                        # If get_values itself raises a connection-related error, 
-                        # let the outer try catch it and trigger reconnection.
-                        if "connection" in str(e).lower() or "socket" in str(e).lower():
-                            raise
+                        if log_samples:
+                            write_api.write(bucket=self.influx_config['bucket'], org=self.influx_config['org'], record=point)
+                            self.data_written.emit(f"✅ Live: {', '.join(log_samples)} ({len(log_samples)} fields)")
+                    except Exception as db_err:
+                        self.log_message.emit(f"Database Write/Process Error: {db_err}")
 
                     await asyncio.sleep(self.interval_ms / 1000.0)
 
@@ -451,85 +455,101 @@ class SetpointWatcherWorker(QThread):
         )
         query_api = influx.query_api()
 
-        try:
-            await asyncio.wait_for(client.connect(), timeout=10.0)
-            self.log_msg.emit(f"Watcher Active on '{self.write_back_meas}'")
-            last_cmd = {}  # holds last known setpoints to continuously re-assert
-            last_logged_writes = {} # tracks actual state pushed to OPC server
-            
-            # Cache nodes and their VariantTypes to prevent asyncua from re-requesting on every loop tick
-            cached_nodes = {}
-            cached_types = {}
-            for nid in self.valid_node_ids:
-                try:
-                    nd = client.get_node(nid)
-                    cached_nodes[nid] = nd
-                    # Fetch and store exact datatype once at startup!
-                    cached_types[nid] = await asyncio.wait_for(nd.read_data_type_as_variant_type(), timeout=2.0)
-                except Exception:
-                    pass
-
-            while self.running:
-                q = f'from(bucket:"{self.influx_bucket}") |> range(start: -24h) |> filter(fn: (r) => r["_measurement"] == "{self.write_back_meas}") |> last()'
-                try:
-                    # Run synchronous InfluxDB query in a thread to prevent freezing the asyncio loop
-                    tables = await asyncio.to_thread(query_api.query, q)
-                    ts = None
-                    new_cmd = {}
-                    for tbl in tables:
-                        for rec in tbl.records:
-                            val = rec.get_value()
-                            if val is not None:
-                                new_cmd[rec.get_field()] = val
-
-                    if new_cmd:
-                        # Only log if there's actually a new or changed value
-                        if any(last_cmd.get(k) != v for k, v in new_cmd.items()):
-                            self.log_msg.emit(f"New Command from {self.write_back_meas}: {new_cmd}")
-                        # Update the persistent dictionary instead of replacing it,
-                        # so that tags older than 1m aren't forgotten and reset to 0
-                        last_cmd.update(new_cmd)
-
-                except Exception as e:
-                    self.log_msg.emit(f"Query Error: {e}")
-                    # Brief pause on error to avoid spamming thread pool
-                    await asyncio.sleep(1)
-
-                # Re-assert ALL last known setpoints every cycle
-                # (prevents simulation engines from resetting values automatically)
-                for field_name, val in last_cmd.items():
-                    target_id = self.allowed_setpoints_map.get(field_name, field_name)
-                    if target_id in self.valid_node_ids and target_id in cached_nodes:
-                        try:
-                            node = cached_nodes[target_id]
-                            vtype = cached_types.get(target_id, ua.VariantType.Double)
-                            
-                            # Build exact variant. Bypasses asyncua background type queries.
-                            dv = ua.DataValue(ua.Variant(float(val), vtype))
-                            
-                            await asyncio.wait_for(
-                                node.write_value(dv),
-                                timeout=5.0
-                            )
-                            # Only log to UI if the value has actually changed, to avoid spam
-                            if last_logged_writes.get(target_id) != val:
-                                self.log_msg.emit(f"--> WROTE: {target_id} = {val}")
-                                last_logged_writes[target_id] = val
-                        except Exception as e:
-                            # Only log error if different than before to avoid spam
-                            if last_logged_writes.get(target_id) != "ERROR":
-                                self.log_msg.emit(f"Write Error {target_id}: {e}")
-                                last_logged_writes[target_id] = "ERROR"
-
-                await asyncio.sleep(0.5)
-        except Exception as e:
-            self.log_msg.emit(f"Watcher Error: {e}")
-        finally:
+        reconnect_delay = 5.0
+        while self.running:
             try:
-                await asyncio.wait_for(client.disconnect(), timeout=2.0)
-            except:
-                pass
-            influx.close()
+                self.log_msg.emit(f"Connecting Setpoint Watcher to {self.opc_config['url']}...")
+                await asyncio.wait_for(client.connect(), timeout=10.0)
+                self.log_msg.emit(f"Setpoint Watcher Connected to {self.opc_config['url']}")
+                reconnect_delay = 5.0  # Reset delay on success
+                
+                # Cache nodes and their VariantTypes to prevent asyncua from re-requesting on every loop tick
+                cached_nodes = {}
+                cached_types = {}
+                for nid in self.valid_node_ids:
+                    try:
+                        nd = client.get_node(nid)
+                        cached_nodes[nid] = nd
+                        cached_types[nid] = await asyncio.wait_for(nd.read_data_type_as_variant_type(), timeout=2.0)
+                    except Exception:
+                        pass
+
+                last_cmd = {}  # holds last known setpoints to continuously re-assert
+                last_logged_writes = {} # tracks actual state pushed to OPC server
+
+                while self.running:
+                    q = f'from(bucket:"{self.influx_bucket}") |> range(start: -24h) |> filter(fn: (r) => r["_measurement"] == "{self.write_back_meas}") |> last()'
+                    try:
+                        # Run synchronous InfluxDB query in a thread to prevent freezing the asyncio loop
+                        tables = await asyncio.to_thread(query_api.query, q)
+                        new_cmd = {}
+                        for tbl in tables:
+                            for rec in tbl.records:
+                                val = rec.get_value()
+                                if val is not None:
+                                    new_cmd[rec.get_field()] = val
+
+                        if new_cmd:
+                            # Only log if there's actually a new or changed value
+                            if any(last_cmd.get(k) != v for k, v in new_cmd.items()):
+                                self.log_msg.emit(f"New Command from {self.write_back_meas}: {new_cmd}")
+                            # Update the persistent dictionary instead of replacing it,
+                            # so that tags older than 1m aren't forgotten and reset to 0
+                            last_cmd.update(new_cmd)
+
+                    except Exception as e:
+                        self.log_msg.emit(f"Query Error (InfluxDB): {e}")
+                        # Brief pause on error to avoid spamming thread pool
+                        await asyncio.sleep(1)
+
+                    # Re-assert ALL last known setpoints every cycle
+                    # (prevents simulation engines from resetting values automatically)
+                    for field_name, val in last_cmd.items():
+                        target_id = self.allowed_setpoints_map.get(field_name, field_name)
+                        if target_id in self.valid_node_ids and target_id in cached_nodes:
+                            try:
+                                node = cached_nodes[target_id]
+                                vtype = cached_types.get(target_id, ua.VariantType.Double)
+                                
+                                # Build exact variant. Bypasses asyncua background type queries.
+                                dv = ua.DataValue(ua.Variant(float(val), vtype))
+                                
+                                await asyncio.wait_for(
+                                    node.write_value(dv),
+                                    timeout=5.0
+                                )
+                                # Only log to UI if the value has actually changed, to avoid spam
+                                if last_logged_writes.get(target_id) != val:
+                                    self.log_msg.emit(f"--> WROTE: {target_id} = {val}")
+                                    last_logged_writes[target_id] = val
+                            except Exception as e:
+                                # Only log error if different than before to avoid spam
+                                if last_logged_writes.get(target_id) != "ERROR":
+                                    self.log_msg.emit(f"Write Error {target_id}: {e}")
+                                    last_logged_writes[target_id] = "ERROR"
+                                
+                                # If it's a socket or connection error, raise to trigger outer reconnection
+                                if "connection" in str(e).lower() or "socket" in str(e).lower() or isinstance(e, asyncio.TimeoutError):
+                                    raise e
+
+                    await asyncio.sleep(0.5)
+
+            except Exception as e:
+                if not self.running: break
+                self.log_msg.emit(f"Setpoint Watcher connection lost: {e}. Retrying in {reconnect_delay}s...")
+                try:
+                    await asyncio.wait_for(client.disconnect(), timeout=2.0)
+                except:
+                    pass
+                await asyncio.sleep(reconnect_delay)
+                reconnect_delay = min(reconnect_delay * 1.5, 60.0) # Adaptive backoff
+
+        # Cleanup
+        try:
+            await asyncio.wait_for(client.disconnect(), timeout=2.0)
+        except:
+            pass
+        influx.close()
 
     def run(self):
         loop = asyncio.new_event_loop()

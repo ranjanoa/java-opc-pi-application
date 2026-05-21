@@ -329,12 +329,25 @@ class OPCInfluxWorker(QThread):
                         point = Point(self.db_measurement).time(timestamp, WritePrecision.NS)
 
                         log_samples = []
+                        if not hasattr(self, '_dv_type_logged'):
+                            self._dv_type_logged = set()
+
                         for i, dv in enumerate(datavalues):
                             nid = self.selected_tags_nodeids[i]
                             tag_name = self.selected_tags.get(nid, nid)
                             meta = self.tag_metadata.get(nid, {"type": "Float"})
                             expected_type = meta.get("type", "Float")
-                            
+
+                            # One-time diagnostic: log the raw type structure for each tag
+                            if nid not in self._dv_type_logged:
+                                dv_type = type(dv).__name__
+                                dv_val_type = type(getattr(dv, 'Value', None)).__name__ if dv is not None else 'N/A'
+                                dv_val_val_type = type(getattr(getattr(dv, 'Value', None), 'Value', None)).__name__ if dv is not None and hasattr(dv, 'Value') else 'N/A'
+                                self.log_message.emit(
+                                    f"🔍 TYPE DIAG [{tag_name}]: dv={dv_type}, dv.Value={dv_val_type}, dv.Value.Value={dv_val_val_type}"
+                                )
+                                self._dv_type_logged.add(nid)
+
                             # Guard: read_attributes may return a raw scalar (e.g. float) instead of a DataValue object
                             if dv is None:
                                 val = None

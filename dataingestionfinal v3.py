@@ -335,7 +335,17 @@ class OPCInfluxWorker(QThread):
                             meta = self.tag_metadata.get(nid, {"type": "Float"})
                             expected_type = meta.get("type", "Float")
                             
-                            val = dv.Value.Value if (dv and dv.Value is not None) else None
+                            # Guard: read_attributes may return a raw scalar (e.g. float) instead of a DataValue object
+                            if dv is None:
+                                val = None
+                            elif hasattr(dv, 'Value') and hasattr(dv.Value, 'Value'):
+                                val = dv.Value.Value
+                            elif hasattr(dv, 'Value'):
+                                # dv.Value is the raw value itself (no nested .Value)
+                                val = dv.Value if dv.Value is not None else None
+                            else:
+                                # dv is itself a raw scalar value
+                                val = dv
 
                             # If batch read returned None, try an individual read fallback
                             if val is None:
@@ -1057,7 +1067,7 @@ class MainWindow(QMainWindow):
         self.opc_username_input = QLineEdit(self.selections.get("opc_username", ""))
         self.opc_password_input = QLineEdit(self.selections.get("opc_password", ""))
         self.opc_password_input.setEchoMode(QLineEdit.EchoMode.Password)
-        self.opc_browse_path_input = QLineEdit(self.selections.get("opc_browse_path", "0:Objects"))
+        self.opc_browse_path_input = QLineEdit(self.selections.get("opc_browse_path", ""))
         f1.addRow("Endpoint:", self.opc_endpoint_input)
         f1.addRow("Username:", self.opc_username_input)
         f1.addRow("Password:", self.opc_password_input)

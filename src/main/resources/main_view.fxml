@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<?import javafx.scene.control.*?>
+<?import javafx.scene.layout.*?>
+
+<VBox spacing="10" alignment="TOP_CENTER" xmlns="http://javafx.com/javafx/17.0.2-ea" xmlns:fx="http://javafx.com/fxml/1" fx:controller="com.cimpor.opc.ui.MainController">
+    <padding><javafx.geometry.Insets top="20" right="20" bottom="20" left="20"/></padding>
+    
+    <Label text="Data@Glance Java Archiver" style="-fx-font-size: 20px; -fx-font-weight: bold;"/>
+    
+    <HBox spacing="15" alignment="CENTER">
+        <Button fx:id="startBtn" text="Start System" onAction="#onStartClick" prefWidth="120" style="-fx-background-color: #2e7d32; -fx-text-fill: white;"/>
+        <Button fx:id="stopBtn" text="Stop System" onAction="#onStopClick" prefWidth="120" style="-fx-background-color: #c62828; -fx-text-fill: white;"/>
+    </HBox>
+
+    <Label fx:id="opcStatusLabel" text="Status: Stopped" style="-fx-font-weight: bold;"/>
+
+    <Label text="System Logs:" />
+    <TextArea fx:id="logArea" editable="false" VBox.vgrow="ALWAYS" />
+</VBox>

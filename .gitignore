@@ -1,3 +1,4 @@
+# Java
 # Compiled class file
 *.class
 
@@ -34,6 +35,28 @@ buildNumber.properties
 .mvn/timing.properties
 .mvn/wrapper/maven-wrapper.jar
 
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+*.spec
+
+# Certificates (private keys - do NOT commit)
+certificates/
+
+# Config files with secrets
+.opc_influx_client_selections.json
+
+# Virtual environments
+venv/
+.venv/
+env/
+
 # IDEs
 .idea/
 *.iml
@@ -41,3 +64,7 @@ buildNumber.properties
 .classpath
 .project
 .settings/
+
+# OS
+.DS_Store
+Thumbs.db

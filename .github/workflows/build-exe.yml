@@ -30,7 +30,7 @@ jobs:
           --dest target/dist `
           --input target/ `
           --name "Cimpor-OPCPI" `
-          --main-class com.cimpor.opc.MainApplication `
+          --main-class com.cimpor.opc.Main `
           --main-jar cimpor-opcpi-java-1.0-SNAPSHOT.jar `
           --win-console
 

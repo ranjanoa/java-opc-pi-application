@@ -98,13 +98,16 @@ public class OpcInfluxGatewayService implements Runnable {
                 requests.add(new MonitoredItemCreateRequest(readValueId, MonitoringMode.Reporting, parameters));
             }
 
-            List<UaMonitoredItem> items = subscription.createMonitoredItems(
-                TimestampsToReturn.Both,
-                requests,
-                (item, id) -> item.setValueConsumer(this::onDataChange)
-            ).get();
-
-            System.out.println("Successfully subscribed to " + items.size() + " tags.");
+            if (requests.isEmpty()) {
+                System.out.println("No tags selected. Skipping subscription.");
+            } else {
+                List<UaMonitoredItem> items = subscription.createMonitoredItems(
+                    TimestampsToReturn.Both,
+                    requests,
+                    (item, id) -> item.setValueConsumer(this::onDataChange)
+                ).get();
+                System.out.println("Successfully subscribed to " + items.size() + " tags.");
+            }
 
             while (running.get()) {
                 Thread.sleep(1000);

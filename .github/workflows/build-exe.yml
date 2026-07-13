@@ -1,0 +1,41 @@
+name: Build Java Application to EXE
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up JDK 21
+      uses: actions/setup-java@v4
+      with:
+        java-version: '21'
+        distribution: 'temurin'
+        cache: maven
+
+    - name: Build with Maven
+      run: mvn clean package -DskipTests
+
+    - name: Build EXE using jpackage
+      run: |
+        jpackage --type exe `
+          --dest target/dist `
+          --input target/ `
+          --name "Cimpor-OPCPI" `
+          --main-class com.cimpor.opc.MainApplication `
+          --main-jar cimpor-opcpi-java-1.0-SNAPSHOT.jar `
+          --win-console
+
+    - name: Upload EXE artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: Cimpor-OPCPI-Executable
+        path: target/dist/*.exe

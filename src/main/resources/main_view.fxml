@@ -1,19 +1,111 @@
 <?xml version="1.0" encoding="UTF-8"?>
+<?import javafx.geometry.Insets?>
 <?import javafx.scene.control.*?>
 <?import javafx.scene.layout.*?>
+<?import javafx.scene.text.Font?>
 
-<VBox spacing="10" alignment="TOP_CENTER" xmlns="http://javafx.com/javafx/17.0.2-ea" xmlns:fx="http://javafx.com/fxml/1" fx:controller="com.cimpor.opc.ui.MainController">
-    <padding><javafx.geometry.Insets top="20" right="20" bottom="20" left="20"/></padding>
+<BorderPane xmlns="http://javafx.com/javafx/17.0.2-ea" xmlns:fx="http://javafx.com/fxml/1" fx:controller="com.cimpor.opc.ui.MainController" stylesheets="@style.css">
+    <top>
+        <VBox alignment="CENTER" style="-fx-background-color: #1a202c; -fx-padding: 15;">
+            <Label text="Data@Glance Java Archiver" textFill="WHITE">
+                <font>
+                    <Font name="System Bold" size="24.0"/>
+                </font>
+            </Label>
+        </VBox>
+    </top>
     
-    <Label text="Data@Glance Java Archiver" style="-fx-font-size: 20px; -fx-font-weight: bold;"/>
+    <center>
+        <TabPane tabClosingPolicy="UNAVAILABLE">
+            <tabs>
+                <Tab text="OPC UA Configuration">
+                    <VBox spacing="15" style="-fx-padding: 20;">
+                        <GridPane hgap="10" vgap="10">
+                            <Label text="Endpoint URL:" GridPane.columnIndex="0" GridPane.rowIndex="0" style="-fx-font-weight: bold;"/>
+                            <TextField fx:id="opcEndpointInput" GridPane.columnIndex="1" GridPane.rowIndex="0" prefWidth="300"/>
+                            
+                            <Label text="Username:" GridPane.columnIndex="0" GridPane.rowIndex="1" style="-fx-font-weight: bold;"/>
+                            <TextField fx:id="opcUsernameInput" GridPane.columnIndex="1" GridPane.rowIndex="1" prefWidth="300"/>
+                            
+                            <Label text="Password:" GridPane.columnIndex="0" GridPane.rowIndex="2" style="-fx-font-weight: bold;"/>
+                            <PasswordField fx:id="opcPasswordInput" GridPane.columnIndex="1" GridPane.rowIndex="2" prefWidth="300"/>
+                            
+                            <Label text="Browse Path:" GridPane.columnIndex="0" GridPane.rowIndex="3" style="-fx-font-weight: bold;"/>
+                            <TextField fx:id="opcBrowsePathInput" GridPane.columnIndex="1" GridPane.rowIndex="3" prefWidth="300"/>
+                            
+                            <Label text="Measurement:" GridPane.columnIndex="0" GridPane.rowIndex="4" style="-fx-font-weight: bold;"/>
+                            <TextField fx:id="opcMeasurementInput" GridPane.columnIndex="1" GridPane.rowIndex="4" prefWidth="300"/>
+                        </GridPane>
+                        <HBox spacing="10">
+                            <Button text="Connect &amp; Browse" style="-fx-background-color: #3182ce; -fx-text-fill: white;"/>
+                            <Button text="Generate Certs" style="-fx-background-color: #4a5568; -fx-text-fill: white;"/>
+                            <CheckBox text="Enable Cert Security" fx:id="useCertSecurityChk" alignment="CENTER_LEFT"/>
+                        </HBox>
+                    </VBox>
+                </Tab>
+                
+                <Tab text="InfluxDB Configuration">
+                    <VBox spacing="15" style="-fx-padding: 20;">
+                        <GridPane hgap="10" vgap="10">
+                            <Label text="Influx URL:" GridPane.columnIndex="0" GridPane.rowIndex="0" style="-fx-font-weight: bold;"/>
+                            <TextField fx:id="influxUrlInput" GridPane.columnIndex="1" GridPane.rowIndex="0" prefWidth="300"/>
+                            
+                            <Label text="Token:" GridPane.columnIndex="0" GridPane.rowIndex="1" style="-fx-font-weight: bold;"/>
+                            <PasswordField fx:id="influxTokenInput" GridPane.columnIndex="1" GridPane.rowIndex="1" prefWidth="300"/>
+                            
+                            <Label text="Org:" GridPane.columnIndex="0" GridPane.rowIndex="2" style="-fx-font-weight: bold;"/>
+                            <TextField fx:id="influxOrgInput" GridPane.columnIndex="1" GridPane.rowIndex="2" prefWidth="300"/>
+                            
+                            <Label text="Bucket:" GridPane.columnIndex="0" GridPane.rowIndex="3" style="-fx-font-weight: bold;"/>
+                            <TextField fx:id="influxBucketInput" GridPane.columnIndex="1" GridPane.rowIndex="3" prefWidth="300"/>
+                        </GridPane>
+                        <HBox spacing="10" alignment="CENTER_LEFT">
+                            <Label text="Polling Interval (ms):" style="-fx-font-weight: bold;"/>
+                            <Spinner fx:id="writeIntervalSpinner" editable="true" prefWidth="100"/>
+                        </HBox>
+                    </VBox>
+                </Tab>
+
+                <Tab text="PI System &amp; Settings">
+                    <VBox spacing="15" style="-fx-padding: 20;">
+                        <Label text="PI Web API Configuration" style="-fx-font-weight: bold; -fx-font-size: 14px;"/>
+                        <GridPane hgap="10" vgap="10">
+                            <Label text="PI URL:" GridPane.columnIndex="0" GridPane.rowIndex="0" style="-fx-font-weight: bold;"/>
+                            <TextField fx:id="piUrlInput" GridPane.columnIndex="1" GridPane.rowIndex="0" prefWidth="300"/>
+                            
+                            <Label text="Username:" GridPane.columnIndex="0" GridPane.rowIndex="1" style="-fx-font-weight: bold;"/>
+                            <TextField fx:id="piUsernameInput" GridPane.columnIndex="1" GridPane.rowIndex="1" prefWidth="300"/>
+                            
+                            <Label text="Password:" GridPane.columnIndex="0" GridPane.rowIndex="2" style="-fx-font-weight: bold;"/>
+                            <PasswordField fx:id="piPasswordInput" GridPane.columnIndex="1" GridPane.rowIndex="2" prefWidth="300"/>
+                        </GridPane>
+                        <Separator/>
+                        <Label text="Simulator Configuration" style="-fx-font-weight: bold; -fx-font-size: 14px;"/>
+                        <HBox spacing="10">
+                            <TextField fx:id="csvPathInput" promptText="Select CSV File..." prefWidth="250" editable="false"/>
+                            <Button text="Browse" style="-fx-background-color: #4a5568; -fx-text-fill: white;"/>
+                        </HBox>
+                    </VBox>
+                </Tab>
+
+                <Tab text="System Logs">
+                    <VBox style="-fx-padding: 10;">
+                        <TextArea fx:id="logArea" editable="false" VBox.vgrow="ALWAYS" style="-fx-font-family: monospace;"/>
+                    </VBox>
+                </Tab>
+            </tabs>
+        </TabPane>
+    </center>
     
-    <HBox spacing="15" alignment="CENTER">
-        <Button fx:id="startBtn" text="Start System" onAction="#onStartClick" prefWidth="120" style="-fx-background-color: #2e7d32; -fx-text-fill: white;"/>
-        <Button fx:id="stopBtn" text="Stop System" onAction="#onStopClick" prefWidth="120" style="-fx-background-color: #c62828; -fx-text-fill: white;"/>
-    </HBox>
-
-    <Label fx:id="opcStatusLabel" text="Status: Stopped" style="-fx-font-weight: bold;"/>
-
-    <Label text="System Logs:" />
-    <TextArea fx:id="logArea" editable="false" VBox.vgrow="ALWAYS" />
-</VBox>
+    <bottom>
+        <VBox style="-fx-background-color: #edf2f7; -fx-padding: 15;" spacing="10">
+            <HBox spacing="15" alignment="CENTER">
+                <Button fx:id="startBtn" text="Start System" onAction="#onStartClick" prefWidth="150" prefHeight="40" style="-fx-background-color: #38a169; -fx-text-fill: white; -fx-font-weight: bold; -fx-font-size: 14px;"/>
+                <Button fx:id="stopBtn" text="Stop System" onAction="#onStopClick" prefWidth="150" prefHeight="40" style="-fx-background-color: #e53e3e; -fx-text-fill: white; -fx-font-weight: bold; -fx-font-size: 14px;"/>
+            </HBox>
+            <HBox alignment="CENTER_LEFT">
+                <Label fx:id="opcStatusLabel" text="Status: Ready" style="-fx-font-weight: bold; -fx-text-fill: #4a5568;"/>
+            </HBox>
+        </VBox>
+    </bottom>
+</BorderPane>

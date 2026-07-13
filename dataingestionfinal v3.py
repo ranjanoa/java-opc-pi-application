@@ -265,6 +265,18 @@ class ServerBrowseDialog(QDialog):
         self.accept()
 
 
+# --- SUBSCRIPTION HANDLER ---
+class OPCSubscriptionHandler:
+    def __init__(self, worker):
+        self.worker = worker
+
+    def datachange_notification(self, node, val, data):
+        try:
+            self.worker.handle_subscription_notification(node, data)
+        except Exception as e:
+            logging.error(f"Error in datachange_notification: {e}")
+
+
 # --- WORKER: OPC UA -> INFLUXDB ---
 class OPCInfluxWorker(QThread):
     log_message = pyqtSignal(str)
@@ -286,176 +298,178 @@ class OPCInfluxWorker(QThread):
         self.interval_ms = interval_ms
         self._is_running = True
         self.value_history = {}  # {nodeId: deque(maxlen=5)}
+        self.pending_writes = {} # Holds the latest values for batching writes to InfluxDB
 
     def stop(self):
         self._is_running = False
         self.log_message.emit("Stopping Gateway...")
 
+    def handle_subscription_notification(self, node, dv):
+        try:
+            nid = node.nodeid.to_string()
+            tag_name = self.selected_tags.get(nid, nid)
+            meta = self.tag_metadata.get(nid, {"type": "Float"})
+            expected_type = meta.get("type", "Float")
+
+            if not hasattr(self, '_diag_logged'):
+                self._diag_logged = set()
+            if not hasattr(self, '_error_logged'):
+                self._error_logged = set()
+
+            # ── FULL ONE-TIME DIAGNOSTIC per tag ──────────────────────────────────
+            if nid not in self._diag_logged:
+                try:
+                    status_code   = getattr(dv, 'StatusCode', 'N/A')
+                    variant       = getattr(dv, 'Value', '<<no .Value attr>>')
+                    variant_type  = getattr(variant, 'VariantType', 'N/A')
+                    inner_val     = getattr(variant, 'Value', '<<no .Value.Value attr>>')
+                    inner_type    = type(inner_val).__name__
+                    raw_repr      = repr(dv)[:200]
+                    self.log_message.emit(
+                        f"━━━━ DIAG [{tag_name}] ━━━━\n"
+                        f"  NodeID      : {nid}\n"
+                        f"  dv type     : {type(dv).__name__}\n"
+                        f"  StatusCode  : {status_code}\n"
+                        f"  dv.Value    : {type(variant).__name__}\n"
+                        f"  VariantType : {variant_type}\n"
+                        f"  inner value : {inner_val!r} ({inner_type})\n"
+                        f"  repr(dv)    : {raw_repr}"
+                    )
+                except Exception as diag_err:
+                    self.log_message.emit(f"  DIAG ERROR for {tag_name}: {diag_err}")
+                self._diag_logged.add(nid)
+
+            # ── VALUE EXTRACTION ──────────────────────────────────────────────────
+            val = None
+            if dv is None:
+                val = None
+            elif hasattr(dv, 'Value') and hasattr(dv.Value, 'Value'):
+                val = dv.Value.Value
+            elif hasattr(dv, 'Value'):
+                val = dv.Value if dv.Value is not None else None
+            else:
+                val = dv
+
+            if val is None:
+                return
+
+            # ── TYPE COERCION ─────────────────────────────────────────────────────
+            final_val = None
+            try:
+                if expected_type == "String":
+                    final_val = str(val)
+                elif expected_type == "Bool":
+                    final_val = bool(val)
+                else:
+                    final_val = float(val)
+            except (ValueError, TypeError) as coerce_err:
+                if nid not in self._error_logged:
+                    self.log_message.emit(
+                        f"⚠️ TYPE COERCE FAIL [{tag_name}]: "
+                        f"expected={expected_type}, got={type(val).__name__}, val={val!r}, err={coerce_err}"
+                    )
+                    self._error_logged.add(nid)
+                return
+
+            # ── ZERO-SPIKE SMOOTHING (Float only) ─────────────────────────────────
+            if expected_type == "Float":
+                if nid not in self.value_history:
+                    self.value_history[nid] = deque(maxlen=5)
+                if final_val == 0.0 and len(self.value_history[nid]) > 0:
+                    avg = sum(self.value_history[nid]) / len(self.value_history[nid])
+                    if abs(avg) > 0.01:
+                        final_val = avg
+                else:
+                    self.value_history[nid].append(final_val)
+
+            if final_val is not None:
+                db_tag_name = tag_name
+                # Auto-append _txt if expected type is String OR if the measurement table name contains "_txt"
+                needs_txt = (expected_type == "String") or ("_txt" in self.db_measurement.lower())
+                if needs_txt and not db_tag_name.endswith("_txt"):
+                    db_tag_name = f"{db_tag_name}_txt"
+                self.pending_writes[db_tag_name] = (final_val, nid)
+
+        except Exception as per_tag_err:
+            if nid not in self._error_logged:
+                import traceback as _tb
+                self.log_message.emit(
+                    f"🔴 PER-TAG ERROR [{tag_name}] ({nid}):\n"
+                    f"  {per_tag_err}\n"
+                    f"  dv repr: {repr(dv)[:300]}\n"
+                    + "".join(_tb.format_exc().splitlines(keepends=True)[-6:])
+                )
+                self._error_logged.add(nid)
+
     async def run_process(self):
         influx = InfluxDBClient(url=self.influx_config['url'], token=self.influx_config['token'],
-                                org=self.influx_config['org'])
+                                org=self.influx_config['org'], timeout=10000)
         write_api = influx.write_api(write_options=SYNCHRONOUS)
-        
+
         reconnect_delay = 5.0
         while self._is_running:
             client = None
+            sub = None
             try:
                 client = Client(url=self.opc_config['url'])
                 await setup_opc_security(client, self.opc_config)
-                
+
                 self.log_message.emit(f"Connecting to {self.opc_config['url']}...")
                 await asyncio.wait_for(client.connect(), timeout=10.0)
                 self.log_message.emit(f"Connected to {self.opc_config['url']}")
                 self.connection_status.emit(True)
                 reconnect_delay = 5.0 # Reset delay on success
-                
+
                 nodes = [client.get_node(nid) for nid in self.selected_tags_nodeids]
 
-                while self._is_running:
-                    # 1. Read from OPC UA (triggers reconnect on error)
-                    try:
-                        nodeids = [node.nodeid for node in nodes]
-                        datavalues = await asyncio.wait_for(
-                            client.uaclient.read_attributes(nodeids, ua.AttributeIds.Value),
-                            timeout=5.0
-                        )
-                    except Exception as opc_err:
-                        self.log_message.emit(f"OPC UA Read Error: {opc_err}")
-                        raise
+                # Create Subscription
+                handler = OPCSubscriptionHandler(self)
+                sub = await client.create_subscription(self.interval_ms, handler)
 
-                    # 2. Process and write to InfluxDB
+                # Subscribe to each node
+                subscribed_count = 0
+                for node in nodes:
                     try:
+                        await sub.subscribe_data_change(node)
+                        subscribed_count += 1
+                    except Exception as sub_err:
+                        self.log_message.emit(f"Failed to subscribe to node {node.nodeid}: {sub_err}")
+
+                self.log_message.emit(f"Successfully subscribed to {subscribed_count}/{len(nodes)} tags.")
+
+                last_conn_check = 0
+                while self._is_running:
+                    # 1. Connection check (every 5 seconds)
+                    now = time.time()
+                    if now - last_conn_check > 5.0:
+                        await client.read_value(ua.NodeId(ua.ObjectIds.Server_ServerStatus_CurrentTime))
+                        last_conn_check = now
+
+                    # 2. Write pending updates to InfluxDB
+                    if self.pending_writes:
+                        writes_to_push = self.pending_writes.copy()
+                        self.pending_writes.clear()
+
                         timestamp = datetime.now(timezone.utc)
                         point = Point(self.db_measurement).time(timestamp, WritePrecision.NS)
-
                         log_samples = []
-                        if not hasattr(self, '_diag_logged'):
-                            self._diag_logged = set()   # tags that had their full diag printed
-                        if not hasattr(self, '_error_logged'):
-                            self._error_logged = set()  # tags that had their error logged (avoid spam)
 
-                        for i, dv in enumerate(datavalues):
-                            nid = self.selected_tags_nodeids[i]
-                            tag_name = self.selected_tags.get(nid, nid)
-                            meta = self.tag_metadata.get(nid, {"type": "Float"})
-                            expected_type = meta.get("type", "Float")
+                        for db_tag_name, (final_val, nid) in writes_to_push.items():
+                            point.field(db_tag_name, final_val)
+                            self.live_data_update.emit(nid, final_val)
+                            if len(log_samples) < 3:
+                                log_samples.append(f"{db_tag_name}={final_val}")
 
-                            # ── PER-TAG ISOLATION: wrap everything so one bad tag never blocks others ──
-                            try:
-                                # ── FULL ONE-TIME DIAGNOSTIC per tag ──────────────────────────────────
-                                if nid not in self._diag_logged:
-                                    import traceback as _tb
-                                    try:
-                                        status_code   = getattr(dv, 'StatusCode', 'N/A')
-                                        variant       = getattr(dv, 'Value', '<<no .Value attr>>')
-                                        variant_type  = getattr(variant, 'VariantType', 'N/A')
-                                        inner_val     = getattr(variant, 'Value', '<<no .Value.Value attr>>')
-                                        inner_type    = type(inner_val).__name__
-                                        raw_repr      = repr(dv)[:200]   # truncate for safety
-                                        self.log_message.emit(
-                                            f"━━━━ DIAG [{tag_name}] ━━━━\n"
-                                            f"  NodeID      : {nid}\n"
-                                            f"  dv type     : {type(dv).__name__}\n"
-                                            f"  StatusCode  : {status_code}\n"
-                                            f"  dv.Value    : {type(variant).__name__}\n"
-                                            f"  VariantType : {variant_type}\n"
-                                            f"  inner value : {inner_val!r} ({inner_type})\n"
-                                            f"  repr(dv)    : {raw_repr}"
-                                        )
-                                    except Exception as diag_err:
-                                        self.log_message.emit(f"  DIAG ERROR for {tag_name}: {diag_err}")
-                                    self._diag_logged.add(nid)
-
-                                # ── VALUE EXTRACTION ──────────────────────────────────────────────────
-                                val = None
-                                if dv is None:
-                                    val = None
-                                elif hasattr(dv, 'Value') and hasattr(dv.Value, 'Value'):
-                                    val = dv.Value.Value
-                                elif hasattr(dv, 'Value'):
-                                    val = dv.Value if dv.Value is not None else None
-                                else:
-                                    val = dv   # raw scalar
-
-                                # ── FALLBACK individual read if batch returned None ─────────────────
-                                if val is None:
-                                    try:
-                                        _node = client.get_node(nid)
-                                        individual_dv = await asyncio.wait_for(_node.read_data_value(), timeout=2.0)
-                                        if individual_dv and individual_dv.Value is not None:
-                                            if hasattr(individual_dv.Value, 'Value'):
-                                                val = individual_dv.Value.Value
-                                            else:
-                                                val = individual_dv.Value
-                                        if val is not None:
-                                            self.log_message.emit(f"ℹ️ Fallback OK [{tag_name}]: {val!r}")
-                                        else:
-                                            sc_batch  = getattr(dv, 'StatusCode', 'N/A')
-                                            sc_indiv  = getattr(individual_dv, 'StatusCode', 'N/A')
-                                            self.log_message.emit(
-                                                f"⚠️ [{tag_name}] still None after fallback. "
-                                                f"BatchSC={sc_batch}  IndivSC={sc_indiv}"
-                                            )
-                                    except Exception as fallback_err:
-                                        self.log_message.emit(f"❌ Fallback EXCEPTION [{tag_name}]: {fallback_err}")
-
-                                if val is None:
-                                    continue  # nothing to write
-
-                                # ── TYPE COERCION ─────────────────────────────────────────────────────
-                                final_val = None
-                                try:
-                                    if expected_type == "String":
-                                        final_val = str(val)
-                                    elif expected_type == "Bool":
-                                        final_val = bool(val)
-                                    else:
-                                        final_val = float(val)
-                                except (ValueError, TypeError) as coerce_err:
-                                    if nid not in self._error_logged:
-                                        self.log_message.emit(
-                                            f"⚠️ TYPE COERCE FAIL [{tag_name}]: "
-                                            f"expected={expected_type}, got={type(val).__name__}, val={val!r}, err={coerce_err}"
-                                        )
-                                        self._error_logged.add(nid)
-                                    continue
-
-                                # ── ZERO-SPIKE SMOOTHING (Float only) ─────────────────────────────────
-                                if expected_type == "Float":
-                                    if nid not in self.value_history:
-                                        self.value_history[nid] = deque(maxlen=5)
-                                    if final_val == 0.0 and len(self.value_history[nid]) > 0:
-                                        avg = sum(self.value_history[nid]) / len(self.value_history[nid])
-                                        if abs(avg) > 0.01:
-                                            final_val = avg
-                                    else:
-                                        self.value_history[nid].append(final_val)
-
-                                if final_val is not None:
-                                    point.field(tag_name, final_val)
-                                    self.live_data_update.emit(nid, final_val)
-                                    if len(log_samples) < 3:
-                                        log_samples.append(f"{tag_name}={final_val}")
-                                    self.log_message.emit(f"DEBUG Trace: {tag_name} = {final_val}")
-
-                            except Exception as per_tag_err:
-                                # Catch-all: log once per tag so we never silently lose a tag
-                                if nid not in self._error_logged:
-                                    import traceback as _tb
-                                    self.log_message.emit(
-                                        f"🔴 PER-TAG ERROR [{tag_name}] ({nid}):\n"
-                                        f"  {per_tag_err}\n"
-                                        f"  dv repr: {repr(dv)[:300]}\n"
-                                        + "".join(_tb.format_exc().splitlines(keepends=True)[-6:])
-                                    )
-                                    self._error_logged.add(nid)
-                                continue  # skip this tag, keep processing the rest
-
-                        if log_samples:
-                            write_api.write(bucket=self.influx_config['bucket'], org=self.influx_config['org'], record=point)
-                            self.data_written.emit(f"✅ Live: {', '.join(log_samples)} ({len(log_samples)} fields)")
-                    except Exception as db_err:
-                        self.log_message.emit(f"Database Write/Process Error: {db_err}")
+                        try:
+                            await asyncio.to_thread(
+                                write_api.write,
+                                bucket=self.influx_config['bucket'],
+                                org=self.influx_config['org'],
+                                record=point
+                            )
+                            self.data_written.emit(f"✅ Live (Sub): {', '.join(log_samples)} ({len(writes_to_push)} fields)")
+                        except Exception as db_err:
+                            self.log_message.emit(f"Database Write Error: {db_err}")
 
                     await asyncio.sleep(self.interval_ms / 1000.0)
 
@@ -463,6 +477,11 @@ class OPCInfluxWorker(QThread):
                 self.connection_status.emit(False)
                 if not self._is_running: break
                 self.log_message.emit(f"Connection lost or error: {e}. Retrying in {reconnect_delay}s...")
+                if sub:
+                    try:
+                        await sub.delete()
+                    except:
+                        pass
                 if client:
                     try:
                         await asyncio.wait_for(client.disconnect(), timeout=2.0)
@@ -472,6 +491,11 @@ class OPCInfluxWorker(QThread):
                 reconnect_delay = min(reconnect_delay * 1.5, 60.0) # Adaptive backoff
 
         self.log_message.emit("Gateway worker finished.")
+        if sub:
+            try:
+                await sub.delete()
+            except:
+                pass
         if client:
             try:
                 await asyncio.wait_for(client.disconnect(), timeout=2.0)
@@ -508,7 +532,8 @@ class SetpointWatcherWorker(QThread):
         influx = InfluxDBClient(
             url=self.influx_config['url'],
             token=self.influx_config['token'],
-            org=self.influx_config['org']
+            org=self.influx_config['org'],
+            timeout=10000
         )
         query_api = influx.query_api()
 
@@ -642,7 +667,7 @@ class SimulatorWorker(QThread):
     def run(self):
         try:
             client = InfluxDBClient(url=self.influx_config['url'], token=self.influx_config['token'],
-                                    org=self.influx_config['org'])
+                                    org=self.influx_config['org'], timeout=10000)
             write_api = client.write_api(write_options=SYNCHRONOUS)
 
             with open(self.csv_file_path, 'r', encoding='utf-8-sig') as f:
@@ -864,7 +889,8 @@ class PIInfluxWorker(QThread):
             influx = InfluxDBClient(
                 url=self.influx_config['url'],
                 token=self.influx_config['token'],
-                org=self.influx_config['org']
+                org=self.influx_config['org'],
+                timeout=10000
             )
             write_api = influx.write_api(write_options=SYNCHRONOUS)
             self.log_message.emit(f"PI Gateway started → {self.db_measurement}")
@@ -2015,7 +2041,7 @@ class MainWindow(QMainWindow):
         self.influx_test_button.setEnabled(False)
         try:
             c = InfluxDBClient(url=self.influx_url_input.text(), token=self.influx_token_input.text(),
-                               org=self.influx_org_input.text())
+                               org=self.influx_org_input.text(), timeout=10000)
             if c.ping():
                 self.influx_connection_status_label.setText("Status: Connected")
                 self.influx_connection_status_label.setStyleSheet("color: #4caf50;")
@@ -2221,6 +2247,8 @@ class MainWindow(QMainWindow):
         self.start_api_button.setEnabled(True)
 
     def closeEvent(self, e):
+        # Set shutting down flag to prevent auto-restart on close exceptions
+        sys.is_shutting_down = True
         # Systematic shutdown of all workers and forceful process termination
         # to prevent background zombie processes on Windows.
         try:
@@ -2241,6 +2269,70 @@ class MainWindow(QMainWindow):
 
 
 if __name__ == "__main__":
+    import time
+    START_TIME = time.time()
+    LOCK_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dataingestion_app.pid")
+    sys.is_shutting_down = False
+
+    # 1. Kill any previous running instances of the app to prevent duplicates
+    try:
+        if os.path.exists(LOCK_FILE):
+            with open(LOCK_FILE, 'r') as f:
+                pid = int(f.read().strip())
+            
+            if pid != os.getpid():
+                # Verify it is a python/dataingestion process before killing to avoid killing wrong PID
+                if os.name == 'nt':
+                    import subprocess
+                    res = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV"], capture_output=True, text=True)
+                    if "python" in res.stdout.lower() or "dataingestion" in res.stdout.lower():
+                        subprocess.run(["taskkill", "/F", "/PID", str(pid)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        time.sleep(1.0)
+                else:
+                    import signal
+                    os.kill(pid, signal.SIGKILL)
+                    time.sleep(1.0)
+    except Exception as e:
+        print(f"Error checking/killing previous instance: {e}", file=sys.stderr)
+
+    # 2. Write current PID to lockfile
+    try:
+        with open(LOCK_FILE, 'w') as f:
+            f.write(str(os.getpid()))
+    except Exception as e:
+        print(f"Failed to write PID lockfile: {e}", file=sys.stderr)
+
+    # 3. Define auto-restart function
+    def auto_restart_app():
+        # Do not restart if the user explicitly closed the app
+        if getattr(sys, 'is_shutting_down', False):
+            return
+        # Only restart if it has run successfully for more than 10 seconds to avoid infinite loops
+        if time.time() - START_TIME > 10.0:
+            try:
+                import subprocess
+                logging.info("Crash detected! Initiating automatic restart...")
+                if os.name == 'nt':
+                    subprocess.Popen([sys.executable] + sys.argv, creationflags=subprocess.CREATE_NEW_CONSOLE | subprocess.DETACHED_PROCESS)
+                else:
+                    subprocess.Popen([sys.executable] + sys.argv, preexec_fn=os.setpgrp)
+            except Exception as e:
+                logging.error(f"Failed to auto-restart: {e}")
+
+    # 4. Setup global exception handlers to prevent Windows zombie processes on crash
+    def global_exception_handler(exctype, value, traceback):
+        logging.critical("Unhandled Exception (Main Thread)", exc_info=(exctype, value, traceback))
+        auto_restart_app()
+        os._exit(1)
+
+    def thread_exception_handler(args):
+        logging.critical(f"Unhandled Exception in thread {args.thread.name}", exc_info=(args.exc_type, args.exc_value, args.exc_traceback))
+        auto_restart_app()
+        os._exit(1)
+
+    sys.excepthook = global_exception_handler
+    threading.excepthook = thread_exception_handler
+
     app = QApplication(sys.argv)
     app.setStyleSheet("""
         QWidget {
@@ -2355,4 +2447,9 @@ if __name__ == "__main__":
     asyncio.set_event_loop(loop)
     w = MainWindow()
     w.show()
-    with loop: loop.run_forever()
+    try:
+        with loop: loop.run_forever()
+    except Exception as e:
+        logging.critical("Fatal Event Loop Exception", exc_info=True)
+        auto_restart_app()
+        os._exit(1)
